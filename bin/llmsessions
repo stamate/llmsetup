@@ -1,0 +1,400 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""List, resume and move Claude Code sessions.
+
+  llmsessions                   sessions for the current folder; pick one to resume
+  llmsessions 1                 resume the newest session for the current folder
+  llmsessions -a                every folder that has sessions, split by store
+  llmsessions --to-folder [N…]  move this folder's sessions (all, or just N) into its llmsetup store
+  llmsessions --to-global [N…]  move them back to ~/.claude
+  add -n to --to-folder/--to-global to see what would move without changing anything
+
+The "global" store is ~/.claude. A "folder" store is the .claude-home that
+llmsetup creates; those folders are found through direnv's allow-list.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sys
+import time
+from dataclasses import dataclass
+from functools import cache
+from pathlib import Path
+
+HOME = Path.home()
+GLOBAL = HOME / ".claude"
+FOLDER_DIR = ".claude-home"
+# Title records, best first.
+TITLES = (("custom-title", "customTitle"), ("ai-title", "aiTitle"), ("last-prompt", "lastPrompt"))
+# Throwaway folders the Claude desktop app creates per chat; the overview shows them as one row.
+APP_FOLDERS = (HOME / "Library/Application Support/Claude/scratch-workspaces",)
+
+
+@dataclass(frozen=True)
+class Store:
+    path: Path  # the config dir itself
+    kind: str   # "global" or "folder"
+
+
+@dataclass
+class Session:
+    store: Store
+    id: str
+    cwd: str
+    when: float
+    file: Path
+    title: str = ""
+
+
+def warn(msg: str) -> None:
+    print(f"llmsessions: {msg}", file=sys.stderr)
+
+
+def parse(line: str) -> dict:
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+@cache
+def real(path: str) -> str:
+    return os.path.realpath(path)
+
+
+def same(a: Path, b: Path) -> bool:
+    return real(str(a)) == real(str(b))
+
+
+# ---------- where sessions live ----------
+
+def find_stores() -> list[Store]:
+    stores = [Store(GLOBAL, "global")]
+
+    # Every folder direnv has allowed; llmsetup folders are among them.
+    allow = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share") / "direnv/allow"
+    folders = set()
+    for entry in allow.glob("*"):
+        try:
+            folders.add(Path(entry.read_text().strip()).parent)
+        except OSError:
+            pass
+    stores += [Store(folder / FOLDER_DIR, "folder") for folder in sorted(folders)]
+
+    # Whatever this shell currently points at, in case direnv doesn't know it.
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        stores.append(Store(Path(os.environ["CLAUDE_CONFIG_DIR"]), "folder"))
+
+    seen, unique = set(), []
+    for store in stores:  # first wins, so the global store keeps its label
+        key = real(str(store.path))
+        if key not in seen and store.path.is_dir():
+            seen.add(key)
+            unique.append(store)
+    return unique
+
+
+def store_sessions(store: Store) -> list[Session]:
+    sessions = []
+    # Top level only: <store>/projects/<folder>/<id>.jsonl (subagent files sit deeper).
+    for file in (store.path / "projects").glob("*/*.jsonl"):
+        cwd, has_user = None, False
+        try:
+            with file.open(encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if cwd is None and '"cwd":' in line:
+                        cwd = parse(line).get("cwd")
+                    if not has_user and '"type":"user"' in line:
+                        has_user = parse(line).get("type") == "user"
+                    if cwd and has_user:
+                        break
+            if cwd and has_user:
+                sessions.append(Session(store, file.stem, cwd, file.stat().st_mtime, file))
+        except OSError as e:
+            warn(f"skipping {tilde(file)}: {e.strerror}")
+    return sessions
+
+
+def title_of(file: Path) -> str:
+    found = {}
+    try:
+        with file.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                for rtype, key in TITLES:
+                    if f'"type":"{rtype}"' in line and (value := parse(line).get(key)):
+                        found[rtype] = value  # keep the latest
+    except OSError:
+        pass
+    return next((found[r] for r, _ in TITLES if r in found), "")
+
+
+def all_sessions() -> list[Session]:
+    return [s for store in find_stores() for s in store_sessions(store)]
+
+
+def local(sessions: list[Session]) -> tuple[str, list[Session], int]:
+    """This folder's sessions, newest first, plus how many sit in subfolders."""
+    cwd = real(os.getcwd())
+    mine = sorted((s for s in sessions if real(s.cwd) == cwd), key=lambda s: -s.when)
+    below = sum(real(s.cwd).startswith(cwd.rstrip("/") + "/") for s in sessions)
+    return cwd, mine, below
+
+
+# ---------- output ----------
+
+def tilde(path) -> str:
+    s, h = str(path), str(HOME)
+    return "~" + s[len(h):] if s == h or s.startswith(h + "/") else s
+
+
+def ago(t: float) -> str:
+    secs = max(0, time.time() - t)
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{int(secs // size)}{unit} ago"
+    return "just now"
+
+
+def cut(s: str, width: int, middle: bool = False) -> str:
+    s = " ".join(s.split())
+    if len(s) <= width:
+        return s
+    if width < 8:
+        return s[:width]
+    if middle:  # paths: keep both ends
+        tail = (width - 1) * 2 // 3
+        return s[: width - 1 - tail] + "…" + s[-tail:]
+    return s[: width - 1] + "…"
+
+
+def table(header: list[str], rows: list[list[str]], right: set[int] = frozenset()) -> None:
+    """Print columns; the last column takes whatever width is left."""
+    cols = shutil.get_terminal_size((100, 24)).columns
+    widths = [max(len(r[i]) for r in [header, *rows]) for i in range(len(header) - 1)]
+    last = max(20, cols - sum(widths) - 2 * len(widths) - 1)
+    for row in [header, *rows]:
+        cells = [c.rjust(w) if i in right else c.ljust(w) for i, (c, w) in enumerate(zip(row, widths))]
+        print("  ".join([*cells, cut(row[-1], last, middle=row is not header and header[-1] == "FOLDER")]))
+
+
+# ---------- views ----------
+
+def overview(sessions: list[Session]) -> None:
+    groups: dict[tuple[str, str], dict] = {}
+    for s in sessions:
+        parent = next((str(p) for p in APP_FOLDERS if s.cwd.startswith(f"{p}/")), None)
+        g = groups.setdefault((parent or s.cwd, s.store.kind),
+                              {"count": 0, "when": 0.0, "cwds": set(), "app": bool(parent)})
+        g["count"] += 1
+        g["when"] = max(g["when"], s.when)
+        g["cwds"].add(s.cwd)
+    if not groups:
+        print("No Claude Code sessions found.")
+        return
+
+    rows = []
+    for (folder, kind), g in sorted(groups.items(), key=lambda kv: -kv[1]["when"]):
+        if g["app"]:
+            label = f"{len(g['cwds'])} folders in {tilde(folder)}"
+        else:
+            label = tilde(folder) + ("" if os.path.isdir(folder) else " (gone)")
+        rows.append([ago(g["when"]), kind, str(g["count"]), label])
+    table(["LAST ACTIVE", "STORE", "SESSIONS", "FOLDER"], rows, right={2})
+
+    in_folders = sum(s.store.kind == "folder" for s in sessions)
+    folders = len({s.cwd for s in sessions})
+    plural = lambda n, word: f"{n} {word}{'s' * (n != 1)}"
+    print(f"\n{plural(folders, 'folder')} · {plural(len(sessions), 'session')} · {in_folders} in folder stores")
+
+
+def here(sessions: list[Session], pick: int | None, ask: bool = True) -> None:
+    cwd, mine, below = local(sessions)
+    hint = f"{below} more in subfolders; " if below else ""
+
+    if not mine:
+        print(f"No sessions in {tilde(cwd)}. ({hint}llmsessions -a lists every folder)")
+        return
+    if pick is not None:
+        if not 1 <= pick <= len(mine):
+            sys.exit(f"llmsessions: pick a number from 1 to {len(mine)}")
+        resume(mine[pick - 1])
+
+    for s in mine:
+        s.title = title_of(s.file)
+    print(f"Sessions in {tilde(cwd)}\n")
+    table(["#", "WHEN", "STORE", "TITLE"],
+          [[str(i), ago(s.when), s.store.kind, s.title or "(untitled)"] for i, s in enumerate(mine, 1)],
+          right={0})
+    if hint:
+        print(f"\n({hint}llmsessions -a lists every folder)")
+
+    if not (ask and sys.stdin.isatty() and sys.stdout.isatty()):
+        return
+    while True:
+        try:
+            answer = input(f"\nResume which? [1-{len(mine)}, Enter to quit] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not answer:
+            return
+        if answer.isdigit() and 1 <= int(answer) <= len(mine):
+            resume(mine[int(answer) - 1])
+
+
+def resume(s: Session) -> None:
+    exe = shutil.which("claude")
+    if not exe:
+        sys.exit("llmsessions: claude is not on your PATH")
+    if not os.path.isdir(s.cwd):
+        sys.exit(f"llmsessions: {tilde(s.cwd)} no longer exists")
+
+    env = dict(os.environ)
+    if s.store.kind == "global":
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR"] = str(s.store.path)
+    argv = ["claude", "--resume", s.id]
+
+    print(f"→ {' '.join(argv)}  (in {tilde(s.cwd)}, {s.store.kind} store)", flush=True)
+    os.chdir(s.cwd)
+    os.execve(exe, argv, env)
+
+
+# ---------- moving sessions between stores ----------
+
+def target_store(to: str) -> Store:
+    if to == "global":
+        return Store(GLOBAL, "global")
+    path = os.environ.get("CLAUDE_CONFIG_DIR")  # the folder store direnv made active here
+    if not path or not Path(path).is_dir() or same(Path(path), GLOBAL):
+        sys.exit("llmsessions: this folder has no folder store; run llmsetup here first")
+    return Store(Path(path), "folder")
+
+
+def alive(pid) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def running(s: Session) -> bool:
+    """Claude keeps <store>/sessions/<pid>.json for every open session."""
+    for marker in (s.store.path / "sessions").glob("*.json"):
+        try:
+            info = parse(marker.read_text(errors="replace"))
+        except OSError:
+            continue
+        if info.get("sessionId") == s.id and alive(info.get("pid")):
+            return True
+    return False
+
+
+def items_to_move(s: Session, target: Store) -> list[tuple[Path, Path]]:
+    """(source, destination) pairs: everything in the store that belongs to this session."""
+    src = s.store.path
+    items = [s.file]
+    if (folder := s.file.with_suffix("")).is_dir():  # projects/<folder>/<id>/
+        items.append(folder)
+    for top in src.iterdir():  # file-history/<id>, session-env/<id>, todos/<id>-…, …
+        if top.is_dir() and top.name not in ("projects", "plugins"):
+            items += [e for e in top.glob(f"{s.id}*") if e.name == s.id or e.name[len(s.id)] in ".-"]
+    return [(p, target.path / p.relative_to(src)) for p in items]
+
+
+def move(sessions: list[Session], to: str, numbers: list[int], dry: bool) -> None:
+    cwd, mine, _ = local(sessions)
+    target = target_store(to)
+    if numbers:
+        if bad := [n for n in numbers if not 1 <= n <= len(mine)]:
+            sys.exit(f"llmsessions: no session {bad[0]} here (1-{len(mine)})")
+        chosen = [mine[n - 1] for n in dict.fromkeys(numbers)]
+    else:
+        chosen = [s for s in mine if not same(s.store.path, target.path)]
+    if not chosen:
+        print(f"Nothing to move: every session in {tilde(cwd)} is already in the {to} store.")
+        return
+
+    verb = "would move" if dry else "moved"
+    moved = []
+    for s in chosen:
+        label = cut(title_of(s.file) or "(untitled)", 60)
+        pairs = []
+        if same(s.store.path, target.path):
+            reason = f"already in the {to} store"
+        elif running(s):
+            reason = "still running; close it first"
+        else:
+            pairs = items_to_move(s, target)
+            clash = next((dst for _, dst in pairs if dst.exists()), None)
+            reason = f"{tilde(clash)} already exists" if clash else None
+        if reason:
+            print(f"{'skip':<10} {label}: {reason}")
+            continue
+
+        if not dry:
+            for src, dst in pairs:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(src, dst)
+        moved.append(s)
+        print(f"{verb:<10} {label} → {to} store ({len(pairs)} item{'s' * (len(pairs) != 1)})")
+
+    # Claude's notes for this folder follow when everything moves.
+    for project in sorted({s.file.parent for s in moved}):
+        memory = project / "memory"
+        dest = target.path / "projects" / project.name / "memory"
+        if not numbers and memory.is_dir() and not dest.exists():
+            if not dry:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(memory, dest)
+            print(f"{verb:<10} Claude's memory for this folder → {to} store")
+        if not dry:
+            try:
+                project.rmdir()  # only if nothing is left in it
+            except OSError:
+                pass
+
+    if moved and not dry:
+        print()
+        here(all_sessions(), None, ask=False)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="llmsessions", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("numbers", nargs="*", type=int, metavar="N",
+                    help="session number from the list: resume it, or with --to-* move it")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("-a", "--all", action="store_true", help="overview of every folder with sessions")
+    mode.add_argument("--to-folder", dest="to", action="store_const", const="folder",
+                      help="move this folder's sessions into its llmsetup store")
+    mode.add_argument("--to-global", dest="to", action="store_const", const="global",
+                      help="move this folder's sessions to ~/.claude")
+    ap.add_argument("-n", "--dry-run", action="store_true", help="with --to-*: only show what would move")
+    args = ap.parse_args()
+
+    sessions = all_sessions()
+    if args.all:
+        overview(sessions)
+    elif args.to:
+        move(sessions, args.to, args.numbers, args.dry_run)
+    elif len(args.numbers) > 1:
+        ap.error("give one session number to resume")
+    else:
+        here(sessions, args.numbers[0] if args.numbers else None)
+
+
+if __name__ == "__main__":
+    main()
