@@ -119,6 +119,49 @@ check "second run installs and signs in to nothing" '! grep -qE "install|auth lo
 out=$(setup "$H")
 check "refuses to run in ~" '[[ $out == *"refusing to run in ~"* && ! -e $H/.envrc ]]'
 
+# ---------- install.sh / uninstall.sh, the way curl runs them ----------
+src=$T/src                      # this checkout's current files as a git repo to install from
+mkdir -p "$src"
+(cd "$repo" && tar --exclude=.git -cf - .) | (cd "$src" && tar -xf -)
+git -C "$src" init -q -b main
+git -C "$src" add -A
+git -C "$src" -c user.name=test -c user.email=test@example.invalid commit -q -m test
+I=$T/fresh                      # another fake home
+mkdir -p "$I/.local/bin" "$I/work/p" "$I/.local/share/direnv/allow"
+echo 'export KEEP=1' > "$I/.zshrc"
+echo 'my own script' > "$I/.local/bin/llmsessions"
+echo 'use llmsetup' > "$I/work/p/.envrc"
+echo "$I/work/p/.envrc" > "$I/.local/share/direnv/allow/p"
+
+piped() {  # piped <script>: run it like `curl … | bash`, in the fake home
+  env -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u ZDOTDIR -u LLMSETUP_DIR HOME="$I" GIT_CONFIG_NOSYSTEM=1 \
+    LLMSETUP_REPO="file://$src" bash < "$src/$1" 2>&1
+}
+copy=$I/.local/share/llmsetup
+
+echo "install / uninstall"
+out=$(piped install.sh)
+check "one-liner downloads llmsetup" '[[ -f $copy/zsh/llmsetup.zsh ]]'
+check "links llmsessions and the direnv helper into the copy" \
+  '[[ $(readlink "$I/.local/bin/llmsessions") == "$copy/bin/llmsessions" && $(readlink "$I/.config/direnv/lib/llmsetup.sh") == "$copy/direnv/llmsetup.sh" ]]'
+check "keeps a different existing llmsessions as .bak" '[[ $(cat "$I/.local/bin/llmsessions.bak") == "my own script" ]]'
+check "adds the zsh line and keeps the rest of .zshrc" 'grep -q "zsh/llmsetup.zsh" "$I/.zshrc" && grep -qx "export KEEP=1" "$I/.zshrc"'
+check "adds both entries to the global gitignore" 'grep -qx .claude-home/ "$I/.config/git/ignore" && grep -qx .codex-home/ "$I/.config/git/ignore"'
+out=$(piped install.sh)
+check "running it again updates instead of downloading" '[[ $out == *"updated ~/.local/share/llmsetup"* ]]'
+check "running it again adds nothing twice" \
+  '[[ $(grep -c llmsetup.zsh "$I/.zshrc") == 1 && $(grep -cx .claude-home/ "$I/.config/git/ignore") == 1 ]]'
+
+out=$(piped uninstall.sh)
+check "uninstall removes the links and puts back the old file" \
+  '[[ ! -e $I/.config/direnv/lib/llmsetup.sh && $(cat "$I/.local/bin/llmsessions") == "my own script" && ! -e $I/.local/bin/llmsessions.bak ]]'
+check "uninstall removes only the llmsetup line from .zshrc" '! grep -q llmsetup.zsh "$I/.zshrc" && grep -qx "export KEEP=1" "$I/.zshrc"'
+check "uninstall deletes the downloaded copy" '[[ ! -e $copy ]]'
+check "uninstall lists folders that still use llmsetup" '[[ $out == *"~/work/p"* ]]'
+check "uninstall keeps the gitignore entries" 'grep -qx .claude-home/ "$I/.config/git/ignore"'
+out=$(piped uninstall.sh); status=$?
+check "running uninstall again is harmless" '[[ $status == 0 && $(cat "$I/.local/bin/llmsessions") == "my own script" ]]'
+
 echo
 if (( fails )); then echo "$fails failed"; exit 1; fi
 echo "all passed"
