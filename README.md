@@ -17,15 +17,20 @@ Give any folder its own Claude Code setup, and find your sessions again.
 ## Install
 
 ```bash
-git clone git@github.com:stamate/llmsetup.git ~/lab/llmsetup
+curl -fsSL https://raw.githubusercontent.com/stamate/llmsetup/main/install.sh | bash
 ```
+
+Then open a new terminal. This keeps a copy in `~/.local/share/llmsetup`. Run the same line again to update.
+
+To work on llmsetup itself, clone it anywhere and install from the clone instead:
+
 ```bash
-~/lab/llmsetup/install.sh
+git clone https://github.com/stamate/llmsetup.git && llmsetup/install.sh
 ```
 
-Then open a new terminal. `install.sh` is safe to run again. It:
+Either way, the installer is safe to run again. It:
 
-- links `~/.local/bin/llmsessions` and `~/.config/direnv/lib/llmsetup.sh` to the files in this repo, so pulling updates is enough
+- links `~/.local/bin/llmsessions` and `~/.config/direnv/lib/llmsetup.sh` to the files in the copy or clone, so updating that is enough
 - adds one `source …/zsh/llmsetup.zsh` line to the end of `~/.zshrc`
 - adds `.claude-home/` and `.codex-home/` to your global gitignore
 
@@ -82,4 +87,18 @@ The tests use fake session data and stand-in `claude` / `codex` / `direnv` comma
 
 ## Uninstall
 
-Remove the `source …/zsh/llmsetup.zsh` line from `~/.zshrc`, then delete `~/.local/bin/llmsessions` and `~/.config/direnv/lib/llmsetup.sh`. Folders you set up keep working until you remove `use llmsetup` from their `.envrc`.
+```bash
+curl -fsSL https://raw.githubusercontent.com/stamate/llmsetup/main/uninstall.sh | bash
+```
+
+Or run `./uninstall.sh` from a clone. It:
+
+- removes the two links (putting back any file the installer had set aside as `*.bak`)
+- removes the line from `~/.zshrc` (a copy is kept as `~/.zshrc.llmsetup.bak`)
+- deletes the downloaded copy in `~/.local/share/llmsetup`; a clone you made yourself is left alone
+
+It also lists the folders that still have `use llmsetup` in their `.envrc`. direnv reports an error in those folders until you remove that line. Their `.claude-home` / `.codex-home`, with your logins and sessions, are kept. So are the global gitignore entries, so those folders' configs never get committed by accident.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
