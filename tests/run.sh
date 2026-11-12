@@ -6,7 +6,7 @@ set -uo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 export UV_CACHE_DIR=${UV_CACHE_DIR:-$(uv cache dir)}
 export UV_PYTHON_INSTALL_DIR=${UV_PYTHON_INSTALL_DIR:-$(uv python dir)}
-T=$(mktemp -d)
+T=$(cd "$(mktemp -d)" && pwd -P)   # the real path, as Claude records folders
 H=$T/home            # fake $HOME
 P=$H/work/proj       # a project folder with an llmsetup store
 helper=
@@ -32,6 +32,9 @@ session "$G/projects/-proj/s2.jsonl" "$P" 3H "$user" '{"type":"ai-title","aiTitl
 session "$G/projects/-proj/s3.jsonl" "$P" 4H                      # no user message: hidden
 session "$G/projects/-proj/s4.jsonl" "$P" 1H "$user" '{"type":"custom-title","customTitle":"Open one"}'
 session "$G/projects/-other/o1.jsonl" "$H/work/other" 5d "$user"   # folder no longer exists
+# Kept where Claude looks for this folder's sessions, but recorded in the folder's old place.
+K=$(printf '%s' "$P" | tr -c 'a-zA-Z0-9' -)
+session "$G/projects/$K/m1.jsonl" "$H/work/old-name" 6H "$user" '{"type":"custom-title","customTitle":"From before the rename"}'
 mkdir -p "$G/file-history/s1" "$G/todos" "$G/sessions" "$G/projects/-proj/memory" "$P/.claude-home"
 echo v1 > "$G/file-history/s1/v1"
 echo '[]' > "$G/todos/s1-agent.json"
@@ -39,13 +42,19 @@ echo '[]' > "$G/todos/s10-agent.json"                             # different se
 echo notes > "$G/projects/-proj/memory/MEMORY.md"
 sleep 300 & helper=$!                                               # stands in for an open session
 printf '{"pid":%d,"sessionId":"s4"}\n' "$helper" > "$G/sessions/$helper.json"
-mkdir -p "$H/.local/share/direnv/allow"
-echo "$P/.envrc" > "$H/.local/share/direnv/allow/x"
+in_home() {  # run a command in the fake home, outside any direnv shell
+  env -u CLAUDE_CONFIG_DIR -u DIRENV_DIR -u DIRENV_FILE -u DIRENV_DIFF -u DIRENV_WATCHES \
+    HOME="$H" XDG_DATA_HOME="$H/.local/share" XDG_CONFIG_HOME="$H/.config" "$@"
+}
+# The project is set up the way llmsetup does it, with the real direnv.
+mkdir -p "$H/.config/direnv/lib"
+ln -s "$repo/direnv/llmsetup.sh" "$H/.config/direnv/lib/llmsetup.sh"
+echo 'use llmsetup' > "$P/.envrc"
+(cd "$P" && in_home direnv allow)
 
 sessions() {  # sessions <folder> <CLAUDE_CONFIG_DIR or ""> [args…]
   local dir=$1 cfg=$2; shift 2
-  (cd "$dir" && env -u CLAUDE_CONFIG_DIR HOME="$H" XDG_DATA_HOME="$H/.local/share" COLUMNS=120 \
-    ${cfg:+CLAUDE_CONFIG_DIR="$cfg"} "$repo/bin/llmsessions" "$@" < /dev/null 2>&1)
+  (cd "$dir" && in_home COLUMNS=120 ${cfg:+CLAUDE_CONFIG_DIR="$cfg"} "$repo/bin/llmsessions" "$@" < /dev/null 2>&1)
 }
 files() { (cd "$H" && find . -type f | sort); }
 
@@ -53,18 +62,21 @@ echo "llmsessions"
 out=$(sessions "$P" "")
 check "lists this folder's sessions with titles" '[[ $out == *First* && $out == *Second* && $out == *"Open one"* ]]'
 check "custom title wins over the AI title" '[[ $out != *"ai name"* ]]'
-check "hides sessions without a user message" '[[ $(grep -c global <<< "$out") == 3 ]]'
+check "lists a session recorded under the folder's old name" '[[ $out == *"From before the rename"* ]]'
+check "hides sessions without a user message" '[[ $(grep -c global <<< "$out") == 4 ]]'
 out=$(sessions "$H" "" -a)
-check "overview counts sessions per folder" '[[ $out == *"global         3  ~/work/proj"* ]]'
+check "overview counts sessions per folder" '[[ $out == *"global         4  ~/work/proj"* && $out != *old-name* ]]'
 check "overview marks deleted folders" '[[ $out == *"~/work/other (gone)"* ]]'
 
 before=$(files)
-sessions "$P" "$P/.claude-home" --to-folder -n > /dev/null
+out=$(sessions "$P" "" --to-folder -n)
 check "dry run changes nothing" '[[ $(files) == "$before" ]]'
+check "finds the folder's config through direnv, outside a direnv shell" '[[ $out == *"would move"* ]]'
 
-out=$(sessions "$P" "$P/.claude-home" --to-folder)
+out=$(sessions "$P" "" --to-folder)
 F=$P/.claude-home
 check "moves the transcript and its subagents" '[[ -f $F/projects/-proj/s1.jsonl && -f $F/projects/-proj/s1/subagents/a.jsonl ]]'
+check "moves the session recorded under the old name" '[[ -f $F/projects/$K/m1.jsonl && ! -e $G/projects/$K/m1.jsonl ]]'
 check "moves file-history and todos of the session" '[[ -f $F/file-history/s1/v1 && -f $F/todos/s1-agent.json ]]'
 check "leaves another session with the same prefix" '[[ -f $G/todos/s10-agent.json && ! -e $F/todos/s10-agent.json ]]'
 check "skips a session that is still open" '[[ $out == *"Open one: still running"* && -f $G/projects/-proj/s4.jsonl ]]'
@@ -73,8 +85,18 @@ check "listing shows the moved sessions in the folder store" '[[ $(grep -c folde
 
 sessions "$P" "$P/.claude-home" --to-global > /dev/null
 check "moving back restores every file" '[[ $(files) == "$before" ]]'
-out=$(sessions "$H/work" "" --to-folder)
+out=$(sessions "$H/work" "$P/.claude-home" --to-folder)   # CLAUDE_CONFIG_DIR left from another folder
 check "refuses --to-folder without an llmsetup store" '[[ $out == *"run llmsetup here first"* ]]'
+
+N=$H/work/notes                    # set up, with only Claude's notes left in ~/.claude
+KN=$(printf '%s' "$N" | tr -c 'a-zA-Z0-9' -)
+mkdir -p "$N" "$G/projects/$KN/memory"
+echo notes > "$G/projects/$KN/memory/MEMORY.md"
+echo 'use llmsetup' > "$N/.envrc"
+(cd "$N" && in_home direnv allow)
+out=$(sessions "$N" "" --to-folder)
+check "moves Claude's notes even with no sessions left" \
+  '[[ -f $N/.claude-home/projects/$KN/memory/MEMORY.md && ! -e $G/projects/$KN ]]'
 
 # ---------- llmsetup with stand-in claude, codex and direnv ----------
 mkdir -p "$T/stub" "$T/state" "$H/work/new"
