@@ -66,8 +66,8 @@ llmsessions --to-global           # move them back to ~/.claude
   - `CLAUDE_CONFIG_DIR=<folder>/.claude-home`
   - `CODEX_HOME=<folder>/.codex-home`
 - **Subfolders** use the nearest set-up parent's config. A subfolder with an `.envrc` of its own replaces the parent's, unless that `.envrc` starts with `source_up`. Run `llmsetup` in a subfolder to give it a separate config.
-- **Where sessions live:** `<config>/projects/<folder path>/<session id>.jsonl`, plus files named after the session ID (`file-history/`, `session-env/`, `todos/`, subagent transcripts). `llmsessions` reads these directly. It finds every folder's config through direnv's list of allowed `.envrc` files.
-- **Moving a session** moves all of those files to the same place in the other config. Open sessions and anything that would overwrite an existing file are skipped. Moving all of a folder's sessions also moves Claude's memory for that folder.
+- **Where sessions live:** `<config>/projects/<folder path>/<session id>.jsonl`, plus files named after the session ID (`file-history/`, `session-env/`, `todos/`, subagent transcripts). `llmsessions` reads these directly. It finds every folder's config through direnv's list of allowed `.envrc` files. Like `claude --resume`, it counts a session as a folder's by the `projects/` directory it's in, so sessions still show up after a folder is moved or renamed.
+- **Moving a session** moves all of those files to the same place in the other config. Open sessions and anything that would overwrite an existing file are skipped. Moving all of a folder's sessions also moves Claude's memory for that folder, even when no sessions are left to move. `--to-folder` asks direnv which config the folder uses, so it also works where direnv isn't active, such as an editor's terminal or Claude's own shell.
 - **Resuming** runs `claude --resume <id>` in the session's folder, with `CLAUDE_CONFIG_DIR` pointing at the config the session lives in. That way sessions from before `llmsetup` can still be resumed.
 
 ## Good to know

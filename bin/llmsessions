@@ -19,7 +19,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -134,8 +136,24 @@ def title_of(file: Path) -> str:
     return next((found[r] for r, _ in TITLES if r in found), "")
 
 
+def project_dir(folder: str) -> str:
+    """The name Claude gives a folder's directory under <store>/projects."""
+    return re.sub(r"[^a-zA-Z0-9]", "-", folder)
+
+
 def all_sessions() -> list[Session]:
-    return [s for store in find_stores() for s in store_sessions(store)]
+    stores = find_stores()
+    sessions = [s for store in stores for s in store_sessions(store)]
+    # A session belongs to the folder whose projects/ directory it sits in: that's where
+    # `claude --resume` looks. The folder recorded inside it can be out of date (the folder
+    # was moved or renamed since), so go by the directory when a known folder matches it.
+    known = {os.getcwd(), *(s.cwd for s in sessions),
+             *(str(store.path.parent) for store in stores if store.kind == "folder")}
+    by_dir = {project_dir(folder): folder for folder in known}
+    for s in sessions:
+        if project_dir(s.cwd) != s.file.parent.name:
+            s.cwd = by_dir.get(s.file.parent.name, s.cwd)
+    return sessions
 
 
 def local(sessions: list[Session]) -> tuple[str, list[Session], int]:
@@ -272,7 +290,14 @@ def resume(s: Session) -> None:
 def target_store(to: str) -> Store:
     if to == "global":
         return Store(GLOBAL, "global")
-    path = os.environ.get("CLAUDE_CONFIG_DIR")  # the folder store direnv made active here
+    if not shutil.which("direnv"):
+        sys.exit("llmsessions: direnv is not installed")
+    # Ask direnv which config a shell here gets, instead of trusting our own environment:
+    # we may not be in a direnv shell (an editor, Claude's own shell), or be in one that
+    # still carries CLAUDE_CONFIG_DIR from another folder.
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+    path = subprocess.run(["direnv", "exec", ".", "printenv", "CLAUDE_CONFIG_DIR"], env=env,
+                          capture_output=True, text=True).stdout.strip()
     if not path or not Path(path).is_dir() or same(Path(path), GLOBAL):
         sys.exit("llmsessions: this folder has no folder store; run llmsetup here first")
     return Store(Path(path), "folder")
@@ -317,13 +342,17 @@ def items_to_move(s: Session, target: Store) -> list[tuple[Path, Path]]:
 def move(sessions: list[Session], to: str, numbers: list[int], dry: bool) -> None:
     cwd, mine, _ = local(sessions)
     target = target_store(to)
+    source = Store(GLOBAL, "global") if to == "folder" else target_store("folder")
+    # Claude's notes for this folder. They outlive its sessions (Claude deletes those after
+    # 30 days by default), so they also move when no session is left to move.
+    notes = source.path / "projects" / project_dir(cwd) / "memory"
     if numbers:
         if bad := [n for n in numbers if not 1 <= n <= len(mine)]:
             sys.exit(f"llmsessions: no session {bad[0]} here (1-{len(mine)})")
         chosen = [mine[n - 1] for n in dict.fromkeys(numbers)]
     else:
         chosen = [s for s in mine if not same(s.store.path, target.path)]
-    if not chosen:
+    if not chosen and (numbers or not notes.is_dir()):
         print(f"Nothing to move: every session in {tilde(cwd)} is already in the {to} store.")
         return
 
@@ -352,7 +381,8 @@ def move(sessions: list[Session], to: str, numbers: list[int], dry: bool) -> Non
         print(f"{verb:<10} {label} → {to} store ({len(pairs)} item{'s' * (len(pairs) != 1)})")
 
     # Claude's notes for this folder follow when everything moves.
-    for project in sorted({s.file.parent for s in moved}):
+    projects = {s.file.parent for s in moved} | (set() if numbers else {notes.parent})
+    for project in sorted(projects):
         memory = project / "memory"
         dest = target.path / "projects" / project.name / "memory"
         if not numbers and memory.is_dir() and not dest.exists():
