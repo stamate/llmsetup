@@ -385,11 +385,17 @@ def move(sessions: list[Session], to: str, numbers: list[int], dry: bool) -> Non
     for project in sorted(projects):
         memory = project / "memory"
         dest = target.path / "projects" / project.name / "memory"
-        if not numbers and memory.is_dir() and not dest.exists():
-            if not dry:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(memory, dest)
-            print(f"{verb:<10} Claude's memory for this folder → {to} store")
+        if not numbers and memory.is_dir():
+            empty = dest.is_dir() and not any(dest.iterdir())  # Claude creates it up front
+            if dest.exists() and not empty:
+                print(f"{'skip':<10} Claude's memory for this folder: {tilde(dest)} already has notes")
+            else:
+                if not dry:
+                    if empty:
+                        dest.rmdir()
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(memory, dest)
+                print(f"{verb:<10} Claude's memory for this folder → {to} store")
         if not dry:
             try:
                 project.rmdir()  # only if nothing is left in it
