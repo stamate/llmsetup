@@ -90,7 +90,7 @@ check "refuses --to-folder without an llmsetup store" '[[ $out == *"run llmsetup
 
 N=$H/work/notes                    # set up, with only Claude's notes left in ~/.claude
 KN=$(printf '%s' "$N" | tr -c 'a-zA-Z0-9' -)
-mkdir -p "$N" "$G/projects/$KN/memory"
+mkdir -p "$N" "$G/projects/$KN/memory" "$N/.claude-home/projects/$KN/memory"   # Claude made an empty one
 echo notes > "$G/projects/$KN/memory/MEMORY.md"
 echo 'use llmsetup' > "$N/.envrc"
 (cd "$N" && in_home direnv allow)
