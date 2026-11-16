@@ -1,8 +1,33 @@
 # llmsetup: give a folder its own Claude Code (and Codex) config via direnv.
 # Sourced from ~/.zshrc by install.sh, after oh-my-zsh. See README.md.
 
+_llmsetup_help() {
+  cat <<'EOF'
+Usage: llmsetup
+
+Give the current folder (and everything below it) its own Claude Code and Codex
+setup: own login, settings, plugins, MCP servers and session history.
+
+  - adds `use llmsetup` to .envrc and runs `direnv allow`
+  - config goes in .claude-home/ and .codex-home/ inside the folder
+  - installs the Codex plugin there, and signs you in to Claude and Codex
+    if this folder isn't signed in yet
+
+Safe to run again: it only does what's missing. Undo it by removing the
+`use llmsetup` line from .envrc (the config folders are kept).
+
+Sessions: `llmsessions --help` lists, resumes and moves them between
+~/.claude and a folder's own config.
+EOF
+}
+
 # Set up the current folder, or finish setting it up if it already is.
 llmsetup() {
+  case $1 in
+    '') ;;
+    -h|--help) _llmsetup_help; return ;;
+    *) echo "llmsetup: unknown option '$1' (see llmsetup --help)" >&2; return 2 ;;
+  esac
   if grep -Eqs '^[[:space:]]*(use llmsetup|export CLAUDE_CONFIG_DIR=)' .envrc; then
     echo "llmsetup: already set up in ${PWD/#$HOME/~}"
   else
