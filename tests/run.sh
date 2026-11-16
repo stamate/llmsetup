@@ -122,12 +122,17 @@ EOF
 printf '#!/bin/sh\necho "direnv $*" >> "%s/calls"\n' "$T" > "$T/stub/direnv"
 chmod +x "$T/stub/"*
 
-setup() {  # setup <folder>: run llmsetup there in a clean zsh
-  (cd "$1" && HOME="$H" PATH="$T/stub:$PATH" zsh -f -c \
-    "source '$repo/zsh/llmsetup.zsh'; llmsetup; print \"leak=\${CLAUDE_CONFIG_DIR-none}\"" 2>&1)
+setup() {  # setup <folder> [args…]: run llmsetup there in a clean zsh
+  local dir=$1; shift
+  (cd "$dir" && HOME="$H" PATH="$T/stub:$PATH" zsh -f -c \
+    "source '$repo/zsh/llmsetup.zsh'; llmsetup $*; print \"leak=\${CLAUDE_CONFIG_DIR-none}\"" 2>&1)
 }
 
 echo "llmsetup"
+out=$(setup "$H/work/new" --help)
+check "--help explains it and sets nothing up" '[[ $out == *"Usage: llmsetup"* && ! -e $H/work/new/.envrc && ! -s $T/calls ]]'
+out=$(setup "$H/work/new" --bogus)
+check "an unknown option is refused" '[[ $out == *"unknown option"* && ! -e $H/work/new/.envrc ]]'
 out=$(setup "$H/work/new")
 check "writes 'use llmsetup' to .envrc" '[[ $(cat "$H/work/new/.envrc") == "use llmsetup" ]]'
 check "adds the Codex plugin to the folder's own config" \
