@@ -12,6 +12,8 @@ setup: own login, settings, plugins, MCP servers and session history.
   - config goes in .claude-home/ and .codex-home/ inside the folder
   - installs the Codex plugin there, and signs you in to Claude and Codex
     if this folder isn't signed in yet
+  - if this folder's Claude sessions or notes are still in ~/.claude, lists
+    them and asks whether to move them in (subfolders: llmsessions --to-folder)
 
 Safe to run again: it only does what's missing. Undo it by removing the
 `use llmsetup` line from .envrc (the config folders are kept).
@@ -39,6 +41,22 @@ llmsetup() {
   fi
   direnv allow || return
   _llmsetup_ready "$PWD"
+  _llmsetup_offer_move
+}
+
+# This folder's sessions and notes still in ~/.claude: list them and offer to move them in.
+_llmsetup_offer_move() {
+  [[ -t 0 ]] && (( $+commands[llmsessions] )) || return 0
+  local preview answer
+  preview=$(llmsessions --to-folder -n 2>/dev/null) && [[ $preview == *"would move"* ]] || return 0
+  echo "llmsetup: this folder still has Claude sessions or notes in ~/.claude:"
+  print -r -- "${preview//would move/ }"
+  read -r "answer?llmsetup: move them into this folder's config? [y/N] "
+  if [[ $answer == [yY]* ]]; then
+    llmsessions --to-folder
+  else
+    echo "llmsetup: left them in ~/.claude (move them later with: llmsessions --to-folder)"
+  fi
 }
 
 # The folder's own Claude and Codex: Codex plugin, then logins. Each step only if missing.

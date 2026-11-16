@@ -120,12 +120,46 @@ case "\$*" in
 esac
 EOF
 printf '#!/bin/sh\necho "direnv $*" >> "%s/calls"\n' "$T" > "$T/stub/direnv"
+cat > "$T/stub/llmsessions" <<EOF
+#!/bin/sh
+echo "llmsessions \$*" >> "$T/calls"
+case "\$*" in
+  *-n*) echo 'would move "Old chat" → folder store (2 items)' ;;
+  *) echo 'moved      "Old chat" → folder store (2 items)' ;;
+esac
+EOF
 chmod +x "$T/stub/"*
 
 setup() {  # setup <folder> [args…]: run llmsetup there in a clean zsh
   local dir=$1; shift
   (cd "$dir" && HOME="$H" PATH="$T/stub:$PATH" zsh -f -c \
     "source '$repo/zsh/llmsetup.zsh'; llmsetup $*; print \"leak=\${CLAUDE_CONFIG_DIR-none}\"" 2>&1)
+}
+
+at_terminal() {  # at_terminal <folder> <answer>: run llmsetup at a terminal, answer when it asks
+  (cd "$1" && HOME="$H" PATH="$T/stub:$PATH" uv run --no-project --quiet python - "$2" \
+    zsh -f -c "source '$repo/zsh/llmsetup.zsh'; llmsetup" <<'PY'
+import os, pty, sys
+answer, argv = sys.argv[1], sys.argv[2:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(argv[0], argv)
+out, asked = b"", False
+while True:
+    try:
+        data = os.read(fd, 4096)
+    except OSError:  # the command finished
+        break
+    if not data:
+        break
+    out += data
+    if not asked and b"[y/N]" in out:
+        os.write(fd, answer.encode() + b"\n")
+        asked = True
+os.waitpid(pid, 0)
+print(out.decode(errors="replace").replace("\r", ""))
+PY
+  )
 }
 
 echo "llmsetup"
@@ -139,6 +173,15 @@ check "adds the Codex plugin to the folder's own config" \
   'grep -q "plugin install codex@openai-codex" "$T/calls" && [[ -f $H/work/new/.claude-home/plugins/installed_plugins.json ]]'
 check "signs in to Claude and Codex when needed" 'grep -qx "claude auth login" "$T/calls" && grep -qx "codex login" "$T/calls"'
 check "leaves the calling shell's settings alone" '[[ $out == *leak=none* ]]'
+check "asks nothing about ~/.claude when not at a terminal" '! grep -q llmsessions "$T/calls"'
+mkdir -p "$H/work/move-yes" "$H/work/move-no"
+: > "$T/calls"
+out=$(at_terminal "$H/work/move-yes" y)
+check "at a terminal, lists what's still in ~/.claude and asks" '[[ $out == *"Old chat"* && $out == *"[y/N]"* ]]'
+check "moves it on yes" 'grep -qx "llmsessions --to-folder" "$T/calls"'
+: > "$T/calls"
+out=$(at_terminal "$H/work/move-no" n)
+check "leaves it on no" '! grep -qx "llmsessions --to-folder" "$T/calls" && [[ $out == *"left them in ~/.claude"* ]]'
 : > "$T/calls"
 out=$(setup "$H/work/new")
 check "second run says it's already set up" '[[ $out == *"already set up"* ]]'

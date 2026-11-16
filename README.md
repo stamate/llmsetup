@@ -2,7 +2,7 @@
 
 Give any folder its own Claude Code setup, and find your sessions again.
 
-- **`llmsetup`** makes the current folder (and everything below it) use its own Claude Code config: its own login, settings, plugins, MCP servers and session history. It does this with a [direnv](https://direnv.net) `.envrc`. It also gives the folder its own Codex home and installs the [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) there. Then it signs you in to both, but only where that's still needed.
+- **`llmsetup`** makes the current folder (and everything below it) use its own Claude Code config: its own login, settings, plugins, MCP servers and session history. It does this with a [direnv](https://direnv.net) `.envrc`. It also gives the folder its own Codex home and installs the [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) there. Then it signs you in to both, but only where that's still needed. If the folder's Claude sessions or notes are still in your global config, it lists them and asks whether to move them in.
 - **`llmsessions`** lists the Claude Code sessions for the folder you're in and resumes the one you pick. It can also show every folder that has sessions, or move sessions between your global config (`~/.claude`) and a folder's own config.
 - **Tab title:** with oh-my-zsh, your terminal tab shows `llm:<folder>` while a folder's own config is active.
 
