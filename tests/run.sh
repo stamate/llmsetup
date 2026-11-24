@@ -95,6 +95,7 @@ echo notes > "$G/projects/$KN/memory/MEMORY.md"
 echo 'use llmsetup' > "$N/.envrc"
 (cd "$N" && in_home direnv allow)
 out=$(sessions "$N" "" --to-folder)
+check "names the notes when moving them" '[[ $out == *"moved      Claude'"'"'s notes for this folder → folder store"* ]]'
 check "moves Claude's notes even with no sessions left" \
   '[[ -f $N/.claude-home/projects/$KN/memory/MEMORY.md && ! -e $G/projects/$KN ]]'
 
@@ -124,7 +125,7 @@ cat > "$T/stub/llmsessions" <<EOF
 #!/bin/sh
 echo "llmsessions \$*" >> "$T/calls"
 case "\$*" in
-  *-n*) echo 'would move "Old chat" → folder store (2 items)' ;;
+  *-n*) cat "$T/state/preview" ;;
   *) echo 'moved      "Old chat" → folder store (2 items)' ;;
 esac
 EOF
@@ -176,11 +177,16 @@ check "leaves the calling shell's settings alone" '[[ $out == *leak=none* ]]'
 check "asks nothing about ~/.claude when not at a terminal" '! grep -q llmsessions "$T/calls"'
 mkdir -p "$H/work/move-yes" "$H/work/move-no"
 : > "$T/calls"
+printf '%s\n' 'would move "Old chat" → folder store (2 items)' \
+  "would move Claude's notes for this folder (5 notes) → folder store" > "$T/state/preview"
 out=$(at_terminal "$H/work/move-yes" y)
 check "at a terminal, lists what's still in ~/.claude and asks" '[[ $out == *"Old chat"* && $out == *"[y/N]"* ]]'
+check "says it found 1 session and the notes" '[[ $out == *"still has 1 Claude session and Claude'"'"'s notes in ~/.claude:"* ]]'
 check "moves it on yes" 'grep -qx "llmsessions --to-folder" "$T/calls"'
 : > "$T/calls"
+echo "would move Claude's notes for this folder (5 notes) → folder store" > "$T/state/preview"
 out=$(at_terminal "$H/work/move-no" n)
+check "says when it found only notes" '[[ $out == *"still has Claude'"'"'s notes in ~/.claude (no sessions):"* && $out == *"(5 notes)"* ]]'
 check "leaves it on no" '! grep -qx "llmsessions --to-folder" "$T/calls" && [[ $out == *"left them in ~/.claude"* ]]'
 : > "$T/calls"
 out=$(setup "$H/work/new")

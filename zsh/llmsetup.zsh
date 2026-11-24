@@ -47,9 +47,17 @@ llmsetup() {
 # This folder's sessions and notes still in ~/.claude: list them and offer to move them in.
 _llmsetup_offer_move() {
   [[ -t 0 ]] && (( $+commands[llmsessions] )) || return 0
-  local preview answer
+  local preview answer what s=s
   preview=$(llmsessions --to-folder -n 2>/dev/null) && [[ $preview == *"would move"* ]] || return 0
-  echo "llmsetup: this folder still has Claude sessions or notes in ~/.claude:"
+  local -a moves=(${(M)${(f)preview}:#would move*})
+  local -i notes=${#${(M)moves:#*"Claude's notes"*}}
+  local -i n=$(( ${#moves} - notes ))
+  (( n == 1 )) && s=
+  if (( !n )); then what="Claude's notes in ~/.claude (no sessions)"
+  elif (( notes )); then what="$n Claude session$s and Claude's notes in ~/.claude"
+  else what="$n Claude session$s in ~/.claude"
+  fi
+  echo "llmsetup: this folder still has $what:"
   print -r -- "${preview//would move/ }"
   read -r "answer?llmsetup: move them into this folder's config? [y/N] "
   if [[ $answer == [yY]* ]]; then
